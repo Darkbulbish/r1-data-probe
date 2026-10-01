@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=240, initial-scale=1.0, user-scalable=no">
+<title>Data Probe</title>
+<style>
+  html, body {
+    width: 240px; height: 282px; margin: 0; padding: 0;
+    overflow: hidden; background: #0a0a0a; color: #f2f2f2;
+    font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+    -webkit-user-select: none; user-select: none;
+  }
+  #app { width: 240px; height: 282px; display: flex; flex-direction: column;
+        padding: 10px 12px; box-sizing: border-box; }
+  #hdr { font-size: 11px; letter-spacing: 2px; color: #2E9BFF; font-weight: 700; }
+  #sub { font-size: 11px; color: #888; margin: 2px 0 6px; }
+  #status { display: flex; align-items: center; gap: 8px; margin: 2px 0 6px;
+            padding: 7px 10px; background: #161616; border-radius: 8px; }
+  #dot { width: 12px; height: 12px; border-radius: 50%; background: #666; flex: none; }
+  #statustext { font-size: 15px; font-weight: 700; }
+  #count { font-size: 13px; color: #bbb; margin-bottom: 4px; }
+  #count b { color: #fff; font-size: 18px; }
+  #list { flex: 1; overflow: hidden; background: #101010; border-radius: 8px;
+          padding: 6px 8px; font-family: ui-monospace, Menlo, monospace;
+          font-size: 11px; line-height: 1.7; color: #bbb; }
+  #list .row { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #list .row.sel { color: #fff; }
+  #list .d { color: #666; }
+  #footer { font-size: 10px; color: #777; margin-top: 6px; text-align: center; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hdr">DATA PROBE</div>
+  <div id="sub">SFO area &middot; 25nm &middot; tries direct, then worker</div>
+  <div id="status"><div id="dot"></div><div id="statustext">IDLE</div></div>
+  <div id="count"><b>--</b> aircraft</div>
+  <div id="list"></div>
+  <div id="footer">side: refresh &nbsp;&middot;&nbsp; scroll: list</div>
+</div>
+<script>
+(function () {
+  "use strict";
+
+  // >>>>>> EDIT ME: your deployed worker URL (trailing slash) <<<<<<
+  var WORKER_URL = "https://YOUR-WORKER.workers.dev/";
+  // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+  var CENTER = { lat: 37.7749, lon: -122.4194 }; // San Francisco (hardcoded for probe)
+  var DIST = 25;
+  var DIRECT_URL = "https://opendata.adsb.fi/api/v2/lat/" + CENTER.lat +
+                   "/lon/" + CENTER.lon + "/dist/" + DIST;
+
+  var aircraft = [];
+  var offset = 0;
+  var loading = false;
+  var bootTime = Date.now();
+
+  var elDot = document.getElementById("dot");
+  var elStatus = document.getElementById("statustext");
+  var elCount = document.getElementById("count");
+  var elList = document.getElementById("list");
+
+  var COLORS = { IDLE: "#666", LOADING: "#e0a63c", OK: "#3fd669", ERROR: "#ff5252" };
+
+  function setStatus(s, detail) {
+    elStatus.textContent = detail ? s + " " + detail : s;
+    elDot.style.background = COLORS[s] || "#666";
+  }
+
+  function nm(lat1, lon1, lat2, lon2) {
+    var R = 3440.065, d2r = Math.PI / 180;
+    var dLat = (lat2 - lat1) * d2r, dLon = (lon2 - lon1) * d2r;
+    var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(lat1 * d2r) * Math.cos(lat2 * d2r) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
+
+  function render() {
+    elCount.innerHTML = "<b>" + aircraft.length + "</b> aircraft";
+    if (!aircraft.length) { elList.innerHTML = ""; return; }
+    var rows = [];
+    var max = Math.min(offset + 5, aircraft.length);
+    for (var i = offset; i < max; i++) {
+      var a = aircraft[i];
+      var name = a.flight || a.hex;
+      var alt = (a.alt != null) ? a.alt + "ft" : "---";
+      rows.push('<div class="row' + (i === offset ? " sel" : "") + '">' +
+                name + ' <span class="d">' + alt + " " +
+                a.d.toFixed(1) + "nm</span></div>");
+    }
+    elList.innerHTML = rows.join("");
+  }
+
+  function normalize(a) {
+    return {
+      hex: a.hex,
+      flight: (a.flight || "").trim(),
+      t: a.t || "",
+      alt: a.alt_baro != null ? Math.round(a.alt_baro)
+           : (a.alt != null ? a.alt : null),
+      gs: a.gs != null ? Math.round(a.gs) : null,
+      track: a.track != null ? Math.round(a.track) : null,
+      lat: a.lat, lon: a.lon
+    };
+  }
+
+  function fetchJson(url, timeoutMs) {
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, timeoutMs);
+    return fetch(url, { signal: ctrl.signal }).then(function (r) {
+      clearTimeout(timer);
+      if (!r.ok) throw new Error("http " + r.status);
+      return r.json();
+    }).catch(function (e) {
+      clearTimeout(timer);
+      throw e;
+    });
+  }
+
+  function showAircraft(data, via) {
+    aircraft = (data.aircraft || []).map(function (raw) {
+      var a = normalize(raw);
+      a.d = (a.lat != null) ? nm(CENTER.lat, CENTER.lon, a.lat, a.lon) : 999;
+      return a;
+    }).sort(function (x, y) { return x.d - y.d; });
+    offset = 0;
+    setStatus("OK", via);
+    render();
+  }
+
+  function refresh() {
+    if (loading) return;
+    loading = true;
+    setStatus("LOADING");
+    // Path 1: direct — some webviews don't enforce CORS.
+    fetchJson(DIRECT_URL, 10000).then(function (data) {
+      loading = false;
+      showAircraft(data, "direct");
+    }).catch(function (e1) {
+      // Path 2: via the Cloudflare worker.
+      if (WORKER_URL.indexOf("YOUR-WORKER") !== -1) {
+        loading = false;
+        setStatus("ERROR", "direct blocked, no worker");
+        return;
+      }
+      fetchJson(WORKER_URL + "?lat=" + CENTER.lat + "&lon=" + CENTER.lon +
+                "&dist=" + DIST, 20000).then(function (data) {
+        loading = false;
+        showAircraft(data, "worker");
+      }).catch(function (e2) {
+        loading = false;
+        var m = e2.name === "AbortError" ? "timeout" : String(e2.message || e2);
+        setStatus("ERROR", m);
+      });
+    });
+  }
+
+  function scrollList(d) {
+    if (!aircraft.length) return;
+    offset = Math.min(Math.max(0, offset + d), Math.max(0, aircraft.length - 1));
+    render();
+  }
+
+  window.addEventListener("sideClick", refresh);
+  window.addEventListener("scrollUp", function () { scrollList(-1); });
+  window.addEventListener("scrollDown", function () { scrollList(1); });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") window.dispatchEvent(new Event("sideClick"));
+    if (e.key === "ArrowUp") window.dispatchEvent(new Event("scrollUp"));
+    if (e.key === "ArrowDown") window.dispatchEvent(new Event("scrollDown"));
+  });
+
+  setStatus("IDLE");
+  refresh();
+})();
+</script>
+</body>
+</html>
